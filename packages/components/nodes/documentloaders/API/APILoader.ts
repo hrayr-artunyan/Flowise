@@ -66,6 +66,13 @@ class API_DocumentLoaders implements INode {
                     'JSON body for the POST request. If not specified, agent will try to figure out itself from AIPlugin if provided',
                 additionalParams: true,
                 optional: true
+            },
+            {
+                label: 'Metadata',
+                name: 'metadata',
+                type: 'json',
+                optional: true,
+                additionalParams: true
             }
         ]
     }
