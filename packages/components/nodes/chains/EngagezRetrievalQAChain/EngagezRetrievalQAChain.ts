@@ -212,11 +212,6 @@ class EngagezRetrievalQAChain_Chains implements INode {
         const params: ICommonObject = { gid: venueID }
 
         const venueSettings = await fetchEngagezConfig(apiUrl, params, apiKey)
-        
-
-        console.log('RUN user id', userID);
-        console.log('RUN venue settings', venueSettings);
-
 
         let customResponsePrompt = responsePrompt
         // If the deprecated systemMessagePrompt is still exists
@@ -257,7 +252,7 @@ class EngagezRetrievalQAChain_Chains implements INode {
         if (process.env.DEBUG === 'true') {
             callbacks.push(new LCConsoleCallbackHandler())
         }
-        const topics = formatTopics(venueSettings?.concierge?.general_knowledges || [])
+        const topics = getTopics(venueSettings);
 
         const stream = answerChain.streamLog(
             { question: input, chat_history: history, topics: topics },
@@ -358,8 +353,9 @@ const formatChatHistoryAsString = (history: BaseMessage[]) => {
     return history.map((message) => `${message._getType()}: ${message.content}`).join('\n')
 }
 
-const getTopics = (input: any) => {
-    return formatTopics(input.topics)
+const getTopics = (venueSettings: any) => {
+    if (!venueSettings || venueSettings?.concierge?.enable_general_knowledges === false) return ''
+    return formatTopics(venueSettings?.concierge?.general_knowledges || '')
 }
 
 const serializeHistory = (input: any) => {
@@ -522,13 +518,12 @@ const fetchEngagezConfig = async (url: string, params: ICommonObject, apiKey: st
             'Content-Type': 'application/json',
             Accept: 'application/json'
         }
-        url = url + '/settings/ai?gid=1515'
-        console.log('params', params)
+
+        url = url + '/settings/ai'
         const response = await axios.get(url, {
-            params, 
+            params,
             headers 
         })
-        console.log('this is general knowledge', response.data.concierge.general_knowledges)
         return response.data
     } catch (error) {
         throw new Error(`Failed to fetch ${url} from Engagez API: ${error}`)
