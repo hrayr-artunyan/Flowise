@@ -1,3 +1,4 @@
+import axios from 'axios'
 import { applyPatch } from 'fast-json-patch'
 import { DataSource } from 'typeorm'
 import { BaseLanguageModel } from '@langchain/core/language_models/base'
@@ -12,8 +13,9 @@ import { StringOutputParser } from '@langchain/core/output_parsers'
 import type { Document } from '@langchain/core/documents'
 import { BufferMemoryInput } from 'langchain/memory'
 import { ConversationalRetrievalQAChain } from 'langchain/chains'
-import { getBaseClasses, mapChatMessageToBaseMessage } from '../../../src/utils'
+import { getBaseClasses, mapChatMessageToBaseMessage, getCredentialData, getCredentialParam } from '../../../src/utils'
 import { ConsoleCallbackHandler, additionalCallbacks } from '../../../src/handler'
+
 import {
     FlowiseMemory,
     ICommonObject,
@@ -29,6 +31,7 @@ import { QA_TEMPLATE, REPHRASE_TEMPLATE, RESPONSE_TEMPLATE } from './prompts'
 type RetrievalChainInput = {
     chat_history: string
     question: string
+    topics: string
 }
 
 const sourceRunnableName = 'FindDocs'
@@ -114,6 +117,18 @@ class EngagezRetrievalQAChain_Chains implements INode {
                 type: 'Moderation',
                 optional: true,
                 list: true
+            },
+            {
+                label: 'Venue ID',
+                name: 'venueID',
+                type: 'number',
+                additionalParams: true
+            },
+            {
+                label: 'User ID',
+                name: 'userID',
+                type: 'number',
+                additionalParams: true
             }
             /** Deprecated
             {
@@ -187,6 +202,22 @@ class EngagezRetrievalQAChain_Chains implements INode {
         const databaseEntities = options.databaseEntities as IDatabaseEntity
         const chatflowid = options.chatflowid as string
 
+        const venueID = nodeData.inputs?.venueID as number
+        const userID = nodeData.inputs?.userID as number
+        
+        const credentialData = await getCredentialData(nodeData.credential ?? '', options)
+        
+        const apiUrl = getCredentialParam('apiURL', credentialData, nodeData)
+        const apiKey = getCredentialParam('apiKey', credentialData, nodeData)
+        const params: ICommonObject = { gid: venueID }
+
+        const venueSettings = await fetchEngagezConfig(apiUrl, params, apiKey)
+        
+
+        console.log('RUN user id', userID);
+        console.log('RUN venue settings', venueSettings);
+
+
         let customResponsePrompt = responsePrompt
         // If the deprecated systemMessagePrompt is still exists
         if (systemMessagePrompt) {
@@ -218,7 +249,6 @@ class EngagezRetrievalQAChain_Chains implements INode {
         const answerChain = createChain(model, vectorStoreRetriever, rephrasePrompt, customResponsePrompt)
 
         const history = ((await memory.getChatMessages(this.sessionId, false)) as IMessage[]) ?? []
-
         const loggerHandler = new ConsoleCallbackHandler(options.logger)
         const additionalCallback = await additionalCallbacks(nodeData, options)
 
@@ -227,9 +257,10 @@ class EngagezRetrievalQAChain_Chains implements INode {
         if (process.env.DEBUG === 'true') {
             callbacks.push(new LCConsoleCallbackHandler())
         }
+        const topics = formatTopics(venueSettings?.concierge?.general_knowledges || [])
 
         const stream = answerChain.streamLog(
-            { question: input, chat_history: history },
+            { question: input, chat_history: history, topics: topics },
             { callbacks },
             {
                 includeNames: [sourceRunnableName]
@@ -319,8 +350,16 @@ const formatDocs = (docs: Document[]) => {
     return docs.map((doc, i) => `<doc id='${i}'>${doc.pageContent}</doc>`).join('\n')
 }
 
+const formatTopics = (topics: string[]) => {
+    return topics.map((topic) => ` - ${topic}`).join('\n')
+}
+
 const formatChatHistoryAsString = (history: BaseMessage[]) => {
     return history.map((message) => `${message._getType()}: ${message.content}`).join('\n')
+}
+
+const getTopics = (input: any) => {
+    return formatTopics(input.topics)
 }
 
 const serializeHistory = (input: any) => {
@@ -346,6 +385,10 @@ const createChain = (
     const retrieverChain = createRetrieverChain(llm, retriever, rephrasePrompt)
 
     const context = RunnableMap.from({
+        topics: RunnableLambda.from((input: RetrievalChainInput) => input.topics).withConfig({
+            runName: 'Itemgetter:topics'
+        }),
+
         context: RunnableSequence.from([
             ({ question, chat_history }) => ({
                 question,
@@ -376,6 +419,9 @@ const createChain = (
 
     const conversationalQAChain = RunnableSequence.from([
         {
+            topics: RunnableLambda.from((input: RetrievalChainInput) => input.topics).withConfig({
+                runName: 'Itemgetter:topics'
+            }),
             question: RunnableLambda.from((input: RetrievalChainInput) => input.question).withConfig({
                 runName: 'Itemgetter:question'
             }),
@@ -388,6 +434,105 @@ const createChain = (
     ])
 
     return conversationalQAChain
+}
+
+interface EngagezAIResponse {
+    concierge: EngagezAIConcierge;
+    assistant: EngagezAIAssistant;
+}
+
+interface EngagezAIConcierge {
+    enable: boolean;
+    general: EngagezAIGeneralConcierge;
+    suggestions: EngagezAISuggestions;
+    datasource: any[];
+    prompts: string[];
+    enable_general_knowledges: boolean;
+    general_knowledges: string[];
+}
+
+interface EngagezAIGeneralConcierge {
+    enable: boolean;
+    flow_id: string;
+    chat_summary_flow_id: string;
+    visibility: string | string[];
+    visibility_ag: number[];
+    name: string;
+    enable_avatar: boolean;
+    greeting: string;
+    noresponse: string;
+    noresponse_user: EngagezAINoResponseUser;
+    tone: string;
+    disclaimer: string;
+}
+
+interface EngagezAINoResponseUser {
+    items: string;
+}
+
+interface EngagezAISuggestions {
+    enable: boolean;
+    flow_id: string;
+    number: string;
+    section_type: string;
+    sections: EngagezAISections;
+}
+
+interface EngagezAISections {
+    sessions: boolean;
+    resources: boolean;
+    halls: boolean;
+    attendees: boolean;
+}
+
+interface EngagezAIAssistant {
+    enable: boolean;
+    general: EngagezAIGeneralAssistant;
+    datasource: any[];
+    prompts: string[];
+    enable_general_knowledges: boolean;
+    general_knowledges: string[];
+    contact_staff: EngagezAIContactStaff;
+}
+
+interface EngagezAIGeneralAssistant {
+    enable: boolean;
+    flow_id: string;
+    chat_summary_flow_id: string;
+    visibility: string[];
+    visibility_ag: number[];
+    name: string;
+    enable_avatar: boolean;
+    greeting: string;
+    noresponse: string;
+    noresponse_user: EngagezAINoResponseUser;
+    tone: string;
+    disclaimer: string;
+}
+
+interface EngagezAIContactStaff {
+    enable: number;
+    label: string;
+}
+
+const fetchEngagezConfig = async (url: string, params: ICommonObject, apiKey: string): Promise<EngagezAIResponse> => {
+    try {
+        const headers = {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json'
+        }
+        url = url + '/settings/ai?gid=1515'
+        console.log('params', params)
+        const response = await axios.get(url, {
+            params, 
+            headers 
+        })
+        console.log('this is general knowledge', response.data.concierge.general_knowledges)
+        return response.data
+    } catch (error) {
+        throw new Error(`Failed to fetch ${url} from Engagez API: ${error}`)
+    }
 }
 
 interface BufferMemoryExtendedInput {
