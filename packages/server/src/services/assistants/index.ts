@@ -1,21 +1,54 @@
-import OpenAI from 'openai'
+import { ICommonObject } from 'flowise-components'
 import { StatusCodes } from 'http-status-codes'
-import { uniqWith, isEqual, cloneDeep } from 'lodash'
-import { getRunningExpressApp } from '../../utils/getRunningExpressApp'
+import { cloneDeep, isEqual, uniqWith } from 'lodash'
+import OpenAI from 'openai'
+import { DeleteResult, In, QueryRunner } from 'typeorm'
 import { Assistant } from '../../database/entities/Assistant'
 import { Credential } from '../../database/entities/Credential'
-import { decryptCredentialData, getAppVersion } from '../../utils'
+import { DocumentStore } from '../../database/entities/DocumentStore'
+import { Workspace } from '../../enterprise/database/entities/workspace.entity'
+import { getWorkspaceSearchOptions } from '../../enterprise/utils/ControllerServiceUtils'
 import { InternalFlowiseError } from '../../errors/internalFlowiseError'
 import { getErrorMessage } from '../../errors/utils'
-import { DeleteResult } from 'typeorm'
+import { AssistantType } from '../../Interface'
+import { FLOWISE_COUNTER_STATUS, FLOWISE_METRIC_COUNTERS } from '../../Interface.Metrics'
+import { databaseEntities, decryptCredentialData, getAppVersion } from '../../utils'
+import { INPUT_PARAMS_TYPE } from '../../utils/constants'
+import { getRunningExpressApp } from '../../utils/getRunningExpressApp'
+import logger from '../../utils/logger'
+import { ASSISTANT_PROMPT_GENERATOR } from '../../utils/prompt'
+import { checkUsageLimit } from '../../utils/quotaUsage'
+import nodesService from '../nodes'
 
-const createAssistant = async (requestBody: any): Promise<Assistant> => {
+const createAssistant = async (requestBody: any, orgId: string): Promise<Assistant> => {
     try {
         const appServer = getRunningExpressApp()
         if (!requestBody.details) {
             throw new InternalFlowiseError(StatusCodes.INTERNAL_SERVER_ERROR, `Invalid request body`)
         }
         const assistantDetails = JSON.parse(requestBody.details)
+
+        if (requestBody.type === 'CUSTOM') {
+            const newAssistant = new Assistant()
+            Object.assign(newAssistant, requestBody)
+
+            const assistant = appServer.AppDataSource.getRepository(Assistant).create(newAssistant)
+            const dbResponse = await appServer.AppDataSource.getRepository(Assistant).save(assistant)
+
+            await appServer.telemetry.sendTelemetry(
+                'assistant_created',
+                {
+                    version: await getAppVersion(),
+                    assistantId: dbResponse.id
+                },
+                orgId
+            )
+            appServer.metricsProvider?.incrementCounter(FLOWISE_METRIC_COUNTERS.ASSISTANT_CREATED, {
+                status: FLOWISE_COUNTER_STATUS.SUCCESS
+            })
+            return dbResponse
+        }
+
         try {
             const credential = await appServer.AppDataSource.getRepository(Credential).findOneBy({
                 id: requestBody.credential
@@ -107,10 +140,17 @@ const createAssistant = async (requestBody: any): Promise<Assistant> => {
         const assistant = appServer.AppDataSource.getRepository(Assistant).create(newAssistant)
         const dbResponse = await appServer.AppDataSource.getRepository(Assistant).save(assistant)
 
-        await appServer.telemetry.sendTelemetry('assistant_created', {
-            version: await getAppVersion(),
-            assistantId: dbResponse.id
-        })
+        await appServer.telemetry.sendTelemetry(
+            'assistant_created',
+            {
+                version: await getAppVersion(),
+                assistantId: dbResponse.id
+            },
+            orgId
+        )
+
+        appServer.metricsProvider?.incrementCounter(FLOWISE_METRIC_COUNTERS.ASSISTANT_CREATED, { status: FLOWISE_COUNTER_STATUS.SUCCESS })
+
         return dbResponse
     } catch (error) {
         throw new InternalFlowiseError(
@@ -128,6 +168,10 @@ const deleteAssistant = async (assistantId: string, isDeleteBoth: any): Promise<
         })
         if (!assistant) {
             throw new InternalFlowiseError(StatusCodes.NOT_FOUND, `Assistant ${assistantId} not found`)
+        }
+        if (assistant.type === 'CUSTOM') {
+            const dbResponse = await appServer.AppDataSource.getRepository(Assistant).delete({ id: assistantId })
+            return dbResponse
         }
         try {
             const assistantDetails = JSON.parse(assistant.details)
@@ -161,15 +205,62 @@ const deleteAssistant = async (assistantId: string, isDeleteBoth: any): Promise<
     }
 }
 
-const getAllAssistants = async (): Promise<Assistant[]> => {
+async function getAssistantsCountByOrganization(type: AssistantType, organizationId: string): Promise<number> {
     try {
         const appServer = getRunningExpressApp()
-        const dbResponse = await appServer.AppDataSource.getRepository(Assistant).find()
+
+        const workspaces = await appServer.AppDataSource.getRepository(Workspace).findBy({ organizationId })
+        const workspaceIds = workspaces.map((workspace) => workspace.id)
+        const assistantsCount = await appServer.AppDataSource.getRepository(Assistant).countBy({
+            type,
+            workspaceId: In(workspaceIds)
+        })
+
+        return assistantsCount
+    } catch (error) {
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.getAssistantsCountByOrganization - ${getErrorMessage(error)}`
+        )
+    }
+}
+
+const getAllAssistants = async (type?: AssistantType, workspaceId?: string): Promise<Assistant[]> => {
+    try {
+        const appServer = getRunningExpressApp()
+        if (type) {
+            const dbResponse = await appServer.AppDataSource.getRepository(Assistant).findBy({
+                type,
+                ...getWorkspaceSearchOptions(workspaceId)
+            })
+            return dbResponse
+        }
+        const dbResponse = await appServer.AppDataSource.getRepository(Assistant).findBy(getWorkspaceSearchOptions(workspaceId))
         return dbResponse
     } catch (error) {
         throw new InternalFlowiseError(
             StatusCodes.INTERNAL_SERVER_ERROR,
             `Error: assistantsService.getAllAssistants - ${getErrorMessage(error)}`
+        )
+    }
+}
+
+const getAllAssistantsCount = async (type?: AssistantType, workspaceId?: string): Promise<number> => {
+    try {
+        const appServer = getRunningExpressApp()
+        if (type) {
+            const dbResponse = await appServer.AppDataSource.getRepository(Assistant).countBy({
+                type,
+                ...getWorkspaceSearchOptions(workspaceId)
+            })
+            return dbResponse
+        }
+        const dbResponse = await appServer.AppDataSource.getRepository(Assistant).countBy(getWorkspaceSearchOptions(workspaceId))
+        return dbResponse
+    } catch (error) {
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.getAllAssistantsCount - ${getErrorMessage(error)}`
         )
     }
 }
@@ -202,6 +293,17 @@ const updateAssistant = async (assistantId: string, requestBody: any): Promise<A
         if (!assistant) {
             throw new InternalFlowiseError(StatusCodes.NOT_FOUND, `Assistant ${assistantId} not found`)
         }
+
+        if (assistant.type === 'CUSTOM') {
+            const body = requestBody
+            const updateAssistant = new Assistant()
+            Object.assign(updateAssistant, body)
+
+            appServer.AppDataSource.getRepository(Assistant).merge(assistant, updateAssistant)
+            const dbResponse = await appServer.AppDataSource.getRepository(Assistant).save(assistant)
+            return dbResponse
+        }
+
         try {
             const openAIAssistantId = JSON.parse(assistant.details)?.id
             const body = requestBody
@@ -289,12 +391,21 @@ const updateAssistant = async (assistantId: string, requestBody: any): Promise<A
     }
 }
 
-const importAssistants = async (newAssistants: Partial<Assistant>[]): Promise<any> => {
+const importAssistants = async (
+    newAssistants: Partial<Assistant>[],
+    orgId: string,
+    _: string,
+    subscriptionId: string,
+    queryRunner?: QueryRunner
+): Promise<any> => {
     try {
         const appServer = getRunningExpressApp()
+        const repository = queryRunner ? queryRunner.manager.getRepository(Assistant) : appServer.AppDataSource.getRepository(Assistant)
 
         // step 1 - check whether array is zero
         if (newAssistants.length == 0) return
+
+        await checkUsageLimit('flows', subscriptionId, appServer.usageCacheManager, newAssistants.length)
 
         // step 2 - check whether ids are duplicate in database
         let ids = '('
@@ -307,7 +418,7 @@ const importAssistants = async (newAssistants: Partial<Assistant>[]): Promise<an
             count += 1
         })
 
-        const selectResponse = await appServer.AppDataSource.getRepository(Assistant)
+        const selectResponse = await repository
             .createQueryBuilder('assistant')
             .select('assistant.id')
             .where(`assistant.id IN ${ids}`)
@@ -327,13 +438,107 @@ const importAssistants = async (newAssistants: Partial<Assistant>[]): Promise<an
         })
 
         // step 4 - transactional insert array of entities
-        const insertResponse = await appServer.AppDataSource.getRepository(Assistant).insert(prepVariables)
+        const insertResponse = await repository.insert(prepVariables)
 
         return insertResponse
     } catch (error) {
         throw new InternalFlowiseError(
             StatusCodes.INTERNAL_SERVER_ERROR,
-            `Error: variableService.importVariables - ${getErrorMessage(error)}`
+            `Error: assistantsService.importAssistants - ${getErrorMessage(error)}`
+        )
+    }
+}
+
+const getChatModels = async (): Promise<any> => {
+    try {
+        const dbResponse = await nodesService.getAllNodesForCategory('Chat Models')
+        return dbResponse.filter((node) => !node.tags?.includes('LlamaIndex'))
+    } catch (error) {
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.getChatModels - ${getErrorMessage(error)}`
+        )
+    }
+}
+
+const getDocumentStores = async (activeWorkspaceId?: string): Promise<any> => {
+    try {
+        const appServer = getRunningExpressApp()
+        const stores = await appServer.AppDataSource.getRepository(DocumentStore).findBy(getWorkspaceSearchOptions(activeWorkspaceId))
+        const returnData = []
+        for (const store of stores) {
+            if (store.status === 'UPSERTED') {
+                const obj = {
+                    name: store.id,
+                    label: store.name,
+                    description: store.description
+                }
+                returnData.push(obj)
+            }
+        }
+        return returnData
+    } catch (error) {
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.getDocumentStores - ${getErrorMessage(error)}`
+        )
+    }
+}
+
+const getTools = async (): Promise<any> => {
+    try {
+        const tools = await nodesService.getAllNodesForCategory('Tools')
+        const mcpTools = await nodesService.getAllNodesForCategory('Tools (MCP)')
+
+        // filter out those tools that input params type are not in the list
+        const filteredTools = [...tools, ...mcpTools].filter((tool) => {
+            const inputs = tool.inputs || []
+            return inputs.every((input) => INPUT_PARAMS_TYPE.includes(input.type))
+        })
+        return filteredTools
+    } catch (error) {
+        throw new InternalFlowiseError(StatusCodes.INTERNAL_SERVER_ERROR, `Error: assistantsService.getTools - ${getErrorMessage(error)}`)
+    }
+}
+
+const generateAssistantInstruction = async (task: string, selectedChatModel: ICommonObject): Promise<ICommonObject> => {
+    try {
+        const appServer = getRunningExpressApp()
+
+        if (selectedChatModel && Object.keys(selectedChatModel).length > 0) {
+            const nodeInstanceFilePath = appServer.nodesPool.componentNodes[selectedChatModel.name].filePath as string
+            const nodeModule = await import(nodeInstanceFilePath)
+            const newNodeInstance = new nodeModule.nodeClass()
+            const nodeData = {
+                credential: selectedChatModel.credential || selectedChatModel.inputs['FLOWISE_CREDENTIAL_ID'] || undefined,
+                inputs: selectedChatModel.inputs,
+                id: `${selectedChatModel.name}_0`
+            }
+            const options: ICommonObject = {
+                appDataSource: appServer.AppDataSource,
+                databaseEntities,
+                logger
+            }
+            const llmNodeInstance = await newNodeInstance.init(nodeData, '', options)
+            const response = await llmNodeInstance.invoke([
+                {
+                    role: 'user',
+                    content: ASSISTANT_PROMPT_GENERATOR.replace('{{task}}', task)
+                }
+            ])
+            const content = response?.content || response.kwargs?.content
+
+            return { content }
+        }
+
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.generateAssistantInstruction - Error generating tool description`
+        )
+    } catch (error) {
+        throw new InternalFlowiseError(
+            StatusCodes.INTERNAL_SERVER_ERROR,
+            `Error: assistantsService.generateAssistantInstruction - ${getErrorMessage(error)}`
         )
     }
 }
@@ -342,7 +547,13 @@ export default {
     createAssistant,
     deleteAssistant,
     getAllAssistants,
+    getAllAssistantsCount,
     getAssistantById,
     updateAssistant,
-    importAssistants
+    importAssistants,
+    getChatModels,
+    getDocumentStores,
+    getTools,
+    generateAssistantInstruction,
+    getAssistantsCountByOrganization
 }

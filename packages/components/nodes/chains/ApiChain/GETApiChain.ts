@@ -26,6 +26,7 @@ class GETApiChain_Chains implements INode {
     baseClasses: string[]
     description: string
     inputs: INodeParams[]
+    badge: string
 
     constructor() {
         this.label = 'GET API Chain'
@@ -34,6 +35,7 @@ class GETApiChain_Chains implements INode {
         this.type = 'GETApiChain'
         this.icon = 'get.svg'
         this.category = 'Chains'
+        this.badge = 'DEPRECATING'
         this.description = 'Chain to run queries against GET API'
         this.baseClasses = [this.type, ...getBaseClasses(APIChain)]
         this.inputs = [
@@ -98,7 +100,7 @@ class GETApiChain_Chains implements INode {
         const ansPrompt = nodeData.inputs?.ansPrompt as string
 
         const chain = await getAPIChain(apiDocs, model, headers, urlPrompt, ansPrompt)
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const callbacks = await additionalCallbacks(nodeData, options)
         const shouldStreamResponse = options.shouldStreamResponse
         const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer

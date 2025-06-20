@@ -14,7 +14,6 @@ class DocStore_DocumentLoaders implements INode {
     baseClasses: string[]
     inputs: INodeParams[]
     outputs: INodeOutputsValue[]
-    badge: string
 
     constructor() {
         this.label = 'Document Store'
@@ -61,7 +60,8 @@ class DocStore_DocumentLoaders implements INode {
                 return returnData
             }
 
-            const stores = await appDataSource.getRepository(databaseEntities['DocumentStore']).find()
+            const searchOptions = options.searchOptions || {}
+            const stores = await appDataSource.getRepository(databaseEntities['DocumentStore']).findBy(searchOptions)
             for (const store of stores) {
                 if (store.status === 'SYNC') {
                     const obj = {

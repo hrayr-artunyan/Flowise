@@ -6,7 +6,7 @@ import { RunnableSequence } from '@langchain/core/runnables'
 import { Tool } from '@langchain/core/tools'
 import { ChatPromptTemplate, HumanMessagePromptTemplate, MessagesPlaceholder } from '@langchain/core/prompts'
 import { formatLogToMessage } from 'langchain/agents/format_scratchpad/log_to_message'
-import { getBaseClasses } from '../../../src/utils'
+import { getBaseClasses, transformBracesWithColon } from '../../../src/utils'
 import {
     FlowiseMemory,
     ICommonObject,
@@ -57,7 +57,6 @@ class XMLAgent_Agents implements INode {
     baseClasses: string[]
     inputs: INodeParams[]
     sessionId?: string
-    badge?: string
 
     constructor(fields?: { sessionId?: string }) {
         this.label = 'XML Agent'
@@ -139,7 +138,7 @@ class XMLAgent_Agents implements INode {
         }
         const executor = await prepareAgent(nodeData, options, { sessionId: this.sessionId, chatId: options.chatId, input })
 
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const callbacks = await additionalCallbacks(nodeData, options)
 
         let res: ChainValues = {}
@@ -223,12 +222,14 @@ const prepareAgent = async (
     const model = nodeData.inputs?.model as BaseChatModel
     const maxIterations = nodeData.inputs?.maxIterations as string
     const memory = nodeData.inputs?.memory as FlowiseMemory
-    const systemMessage = nodeData.inputs?.systemMessage as string
+    let systemMessage = nodeData.inputs?.systemMessage as string
     let tools = nodeData.inputs?.tools
     tools = flatten(tools)
     const inputKey = memory.inputKey ? memory.inputKey : 'input'
     const memoryKey = memory.memoryKey ? memory.memoryKey : 'chat_history'
     const prependMessages = options?.prependMessages
+
+    systemMessage = transformBracesWithColon(systemMessage)
 
     let promptMessage = systemMessage ? systemMessage : defaultSystemMessage
     if (memory.memoryKey) promptMessage = promptMessage.replaceAll('{chat_history}', `{${memory.memoryKey}}`)

@@ -12,7 +12,7 @@ import {
 import { AIMessage, AIMessageChunk, BaseMessage, ToolMessage } from '@langchain/core/messages'
 import { StructuredTool } from '@langchain/core/tools'
 import { RunnableConfig } from '@langchain/core/runnables'
-import { ARTIFACTS_PREFIX, SOURCE_DOCUMENTS_PREFIX } from '../../../src/agents'
+import { ARTIFACTS_PREFIX, SOURCE_DOCUMENTS_PREFIX, TOOL_ARGS_PREFIX } from '../../../src/agents'
 import { Document } from '@langchain/core/documents'
 import { DataSource } from 'typeorm'
 import { MessagesState, RunnableCallable, customGet, getVM } from '../commonUtils'
@@ -48,9 +48,9 @@ const howToUseCode = `
             "sourceDocuments": [
                 {
                     "pageContent": "This is the page content",
-                    "metadata": "{foo: var}",
+                    "metadata": "{foo: var}"
                 }
-            ],
+            ]
         }
     ]
     \`\`\`
@@ -64,7 +64,7 @@ const howToUseCode = `
     */
     
     return {
-        "sources": $flow.output[0].sourceDocuments
+        "sources": $flow.output[0].toolOutput
     }
     \`\`\`
 
@@ -89,17 +89,19 @@ const howToUse = `
     |-----------|-----------|
     | user      | john doe  |
 
-2. If you want to use the agent's output as the value to update state, it is available as available as \`$flow.output\` with the following structure (array):
+2. If you want to use the Tool Node's output as the value to update state, it is available as available as \`$flow.output\` with the following structure (array):
     \`\`\`json
     [
         {
-            "content": "Hello! How can I assist you today?",
+            "tool": "tool's name",
+            "toolInput": {},
+            "toolOutput": "tool's output content",
             "sourceDocuments": [
                 {
                     "pageContent": "This is the page content",
-                    "metadata": "{foo: var}",
+                    "metadata": "{foo: var}"
                 }
-            ],
+            ]
         }
     ]
     \`\`\`
@@ -107,7 +109,7 @@ const howToUse = `
     For example:
     | Key          | Value                                     |
     |--------------|-------------------------------------------|
-    | sources      | \`$flow.output[0].sourceDocuments\`       |
+    | sources      | \`$flow.output[0].toolOutput\`       |
 
 3. You can get default flow config, including the current "state":
     - \`$flow.sessionId\`
@@ -152,7 +154,7 @@ class ToolNode_SeqAgents implements INode {
     constructor() {
         this.label = 'Tool Node'
         this.name = 'seqToolNode'
-        this.version = 2.0
+        this.version = 2.1
         this.type = 'ToolNode'
         this.icon = 'toolNode.svg'
         this.category = 'Sequential Agents'
@@ -446,6 +448,17 @@ class ToolNode<T extends IStateWithMessages | BaseMessage[] | MessagesState> ext
                     }
                 }
 
+                let toolInput
+                if (typeof output === 'string' && output.includes(TOOL_ARGS_PREFIX)) {
+                    const outputArray = output.split(TOOL_ARGS_PREFIX)
+                    output = outputArray[0]
+                    try {
+                        toolInput = JSON.parse(outputArray[1])
+                    } catch (e) {
+                        console.error('Error parsing tool input from tool')
+                    }
+                }
+
                 return new ToolMessage({
                     name: tool.name,
                     content: typeof output === 'string' ? output : JSON.stringify(output),
@@ -453,11 +466,11 @@ class ToolNode<T extends IStateWithMessages | BaseMessage[] | MessagesState> ext
                     additional_kwargs: {
                         sourceDocuments,
                         artifacts,
-                        args: call.args,
+                        args: toolInput ?? call.args,
                         usedTools: [
                             {
                                 tool: tool.name ?? '',
-                                toolInput: call.args,
+                                toolInput: toolInput ?? call.args,
                                 toolOutput: output
                             }
                         ]
@@ -496,7 +509,7 @@ const getReturnOutput = async (
     const updateStateMemory = nodeData.inputs?.updateStateMemory as string
 
     const selectedTab = tabIdentifier ? tabIdentifier.split(`_${nodeData.id}`)[0] : 'updateStateMemoryUI'
-    const variables = await getVars(appDataSource, databaseEntities, nodeData)
+    const variables = await getVars(appDataSource, databaseEntities, nodeData, options)
 
     const reformattedOutput = outputs.map((output) => {
         return {
@@ -559,7 +572,7 @@ const getReturnOutput = async (
             throw new Error(e)
         }
     } else if (selectedTab === 'updateStateMemoryCode' && updateStateMemoryCode) {
-        const vm = await getVM(appDataSource, databaseEntities, nodeData, flow)
+        const vm = await getVM(appDataSource, databaseEntities, nodeData, options, flow)
         try {
             const response = await vm.run(`module.exports = async function() {${updateStateMemoryCode}}()`, __dirname)
             if (typeof response !== 'object') throw new Error('Return output must be an object')

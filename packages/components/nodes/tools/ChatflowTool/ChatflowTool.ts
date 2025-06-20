@@ -23,7 +23,7 @@ class ChatflowTool_Tools implements INode {
     constructor() {
         this.label = 'Chatflow Tool'
         this.name = 'ChatflowTool'
-        this.version = 5.0
+        this.version = 5.1
         this.type = 'ChatflowTool'
         this.icon = 'chatflowTool.svg'
         this.category = 'Tools'
@@ -106,7 +106,10 @@ class ChatflowTool_Tools implements INode {
                 type: 'string',
                 description: 'Custom input to be passed to the chatflow. Leave empty to let LLM decides the input.',
                 optional: true,
-                additionalParams: true
+                additionalParams: true,
+                show: {
+                    useQuestionFromChat: false
+                }
             }
         ]
     }
@@ -122,12 +125,24 @@ class ChatflowTool_Tools implements INode {
                 return returnData
             }
 
-            const chatflows = await appDataSource.getRepository(databaseEntities['ChatFlow']).find()
+            const searchOptions = options.searchOptions || {}
+            const chatflows = await appDataSource.getRepository(databaseEntities['ChatFlow']).findBy(searchOptions)
 
             for (let i = 0; i < chatflows.length; i += 1) {
+                let type = chatflows[i].type
+                if (type === 'AGENTFLOW') {
+                    type = 'AgentflowV2'
+                } else if (type === 'MULTIAGENT') {
+                    type = 'AgentflowV1'
+                } else if (type === 'ASSISTANT') {
+                    type = 'Custom Assistant'
+                } else {
+                    type = 'Chatflow'
+                }
                 const data = {
                     label: chatflows[i].name,
-                    name: chatflows[i].id
+                    name: chatflows[i].id,
+                    description: type
                 } as INodeOptionsValue
                 returnData.push(data)
             }
@@ -164,7 +179,7 @@ class ChatflowTool_Tools implements INode {
         let toolInput = ''
         if (useQuestionFromChat) {
             toolInput = input
-        } else if (!customInput) {
+        } else if (customInput) {
             toolInput = customInput
         }
 
@@ -313,12 +328,21 @@ class ChatflowTool extends StructuredTool {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'flowise-tool': 'true',
                 ...this.headers
             },
             body: JSON.stringify(body)
         }
 
-        let sandbox = { $callOptions: options, $callBody: body }
+        let sandbox = {
+            $callOptions: options,
+            $callBody: body,
+            util: undefined,
+            Symbol: undefined,
+            child_process: undefined,
+            fs: undefined,
+            process: undefined
+        }
 
         const code = `
 const fetch = require('node-fetch');
@@ -349,7 +373,10 @@ try {
             require: {
                 external: { modules: deps },
                 builtin: builtinDeps
-            }
+            },
+            eval: false,
+            wasm: false,
+            timeout: 10000
         } as any
 
         const vm = new NodeVM(vmOptions)

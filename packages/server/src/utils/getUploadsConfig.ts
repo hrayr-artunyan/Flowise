@@ -8,7 +8,7 @@ import { InternalFlowiseError } from '../errors/internalFlowiseError'
 type IUploadConfig = {
     isSpeechToTextEnabled: boolean
     isImageUploadAllowed: boolean
-    isFileUploadAllowed: boolean
+    isRAGFileUploadAllowed: boolean
     imgUploadSizeAndTypes: IUploadFileSizeAndTypes[]
     fileUploadSizeAndTypes: IUploadFileSizeAndTypes[]
 }
@@ -32,7 +32,7 @@ export const utilGetUploadsConfig = async (chatflowid: string): Promise<IUploadC
 
     let isSpeechToTextEnabled = false
     let isImageUploadAllowed = false
-    let isFileUploadAllowed = false
+    let isRAGFileUploadAllowed = false
 
     /*
      * Check for STT
@@ -51,7 +51,7 @@ export const utilGetUploadsConfig = async (chatflowid: string): Promise<IUploadC
     }
 
     /*
-     * Condition for isFileUploadAllowed
+     * Condition for isRAGFileUploadAllowed
      * 1.) vector store with fileUpload = true && connected to a document loader with fileType
      */
     const fileUploadSizeAndTypes: IUploadFileSizeAndTypes[] = []
@@ -70,7 +70,7 @@ export const utilGetUploadsConfig = async (chatflowid: string): Promise<IUploadC
                         fileTypes: fileType.split(', '),
                         maxUploadSize: 500
                     })
-                    isFileUploadAllowed = true
+                    isRAGFileUploadAllowed = true
                 }
             }
             break
@@ -92,29 +92,50 @@ export const utilGetUploadsConfig = async (chatflowid: string): Promise<IUploadC
         'supervisor',
         'seqStart'
     ]
-    const imgUploadLLMNodes = ['chatOpenAI', 'chatAnthropic', 'awsChatBedrock', 'azureChatOpenAI', 'chatGoogleGenerativeAI']
 
-    if (nodes.some((node) => imgUploadAllowedNodes.includes(node.data.name))) {
-        nodes.forEach((node: IReactFlowNode) => {
-            if (imgUploadLLMNodes.indexOf(node.data.name) > -1) {
-                // TODO: for now the maxUploadSize is hardcoded to 5MB, we need to add it to the node properties
-                node.data.inputParams.map((param: INodeParams) => {
-                    if (param.name === 'allowImageUploads' && node.data.inputs?.['allowImageUploads']) {
-                        imgUploadSizeAndTypes.push({
-                            fileTypes: 'image/gif;image/jpeg;image/png;image/webp;'.split(';'),
-                            maxUploadSize: 5
-                        })
-                        isImageUploadAllowed = true
-                    }
-                })
+    const isAgentflow = nodes.some((node) => node.data.category === 'Agent Flows')
+
+    if (isAgentflow) {
+        // check through all the nodes and check if any of the nodes data inputs agentModelConfig or llmModelConfig or conditionAgentModelConfig has allowImageUploads
+        nodes.forEach((node) => {
+            if (node.data.category === 'Agent Flows') {
+                if (
+                    node.data.inputs?.agentModelConfig?.allowImageUploads ||
+                    node.data.inputs?.llmModelConfig?.allowImageUploads ||
+                    node.data.inputs?.conditionAgentModelConfig?.allowImageUploads
+                ) {
+                    imgUploadSizeAndTypes.push({
+                        fileTypes: 'image/gif;image/jpeg;image/png;image/webp;'.split(';'),
+                        maxUploadSize: 5
+                    })
+                    isImageUploadAllowed = true
+                }
             }
         })
+    } else {
+        if (nodes.some((node) => imgUploadAllowedNodes.includes(node.data.name))) {
+            nodes.forEach((node: IReactFlowNode) => {
+                const data = node.data
+                if (data.category === 'Chat Models' && data.inputs?.['allowImageUploads'] === true) {
+                    // TODO: for now the maxUploadSize is hardcoded to 5MB, we need to add it to the node properties
+                    node.data.inputParams.map((param: INodeParams) => {
+                        if (param.name === 'allowImageUploads' && node.data.inputs?.['allowImageUploads']) {
+                            imgUploadSizeAndTypes.push({
+                                fileTypes: 'image/gif;image/jpeg;image/png;image/webp;'.split(';'),
+                                maxUploadSize: 5
+                            })
+                            isImageUploadAllowed = true
+                        }
+                    })
+                }
+            })
+        }
     }
 
     return {
         isSpeechToTextEnabled,
         isImageUploadAllowed,
-        isFileUploadAllowed,
+        isRAGFileUploadAllowed,
         imgUploadSizeAndTypes,
         fileUploadSizeAndTypes
     }

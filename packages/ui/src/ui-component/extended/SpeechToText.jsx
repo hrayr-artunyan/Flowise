@@ -6,6 +6,7 @@ import { enqueueSnackbar as enqueueSnackbarAction, closeSnackbar as closeSnackba
 // material-ui
 import { Typography, Box, Button, FormControl, ListItem, ListItemAvatar, ListItemText, MenuItem, Select } from '@mui/material'
 import { IconX } from '@tabler/icons-react'
+import { useTheme } from '@mui/material/styles'
 
 // Project import
 import CredentialInputHandler from '@/views/canvas/CredentialInputHandler'
@@ -17,6 +18,8 @@ import { Dropdown } from '@/ui-component/dropdown/Dropdown'
 import openAISVG from '@/assets/images/openai.svg'
 import assemblyAIPng from '@/assets/images/assemblyai.png'
 import localAiPng from '@/assets/images/localai.png'
+import azureSvg from '@/assets/images/azure_openai.svg'
+import groqPng from '@/assets/images/groq.png'
 
 // store
 import useNotifier from '@/utils/useNotifier'
@@ -29,7 +32,9 @@ import chatflowsApi from '@/api/chatflows'
 const SpeechToTextType = {
     OPENAI_WHISPER: 'openAIWhisper',
     ASSEMBLYAI_TRANSCRIBE: 'assemblyAiTranscribe',
-    LOCALAI_STT: 'localAISTT'
+    LOCALAI_STT: 'localAISTT',
+    AZURE_COGNITIVE: 'azureCognitive',
+    GROQ_WHISPER: 'groqWhisper'
 }
 
 // Weird quirk - the key must match the name property value.
@@ -139,6 +144,98 @@ const speechToTextProviders = {
                 optional: true
             }
         ]
+    },
+    [SpeechToTextType.AZURE_COGNITIVE]: {
+        label: 'Azure Cognitive Services',
+        name: SpeechToTextType.AZURE_COGNITIVE,
+        icon: azureSvg,
+        url: 'https://azure.microsoft.com/en-us/products/cognitive-services/speech-services',
+        inputs: [
+            {
+                label: 'Connect Credential',
+                name: 'credential',
+                type: 'credential',
+                credentialNames: ['azureCognitiveServices']
+            },
+            {
+                label: 'Language',
+                name: 'language',
+                type: 'string',
+                description: 'The recognition language (e.g., "en-US", "es-ES")',
+                placeholder: 'en-US',
+                optional: true
+            },
+            {
+                label: 'Profanity Filter Mode',
+                name: 'profanityFilterMode',
+                type: 'options',
+                description: 'How to handle profanity in the transcription',
+                options: [
+                    {
+                        label: 'None',
+                        name: 'None'
+                    },
+                    {
+                        label: 'Masked',
+                        name: 'Masked'
+                    },
+                    {
+                        label: 'Removed',
+                        name: 'Removed'
+                    }
+                ],
+                default: 'Masked',
+                optional: true
+            },
+            {
+                label: 'Audio Channels',
+                name: 'channels',
+                type: 'string',
+                description: 'Comma-separated list of audio channels to process (e.g., "0,1")',
+                placeholder: '0,1',
+                default: '0,1'
+            }
+        ]
+    },
+    [SpeechToTextType.GROQ_WHISPER]: {
+        label: 'Groq Whisper',
+        name: SpeechToTextType.GROQ_WHISPER,
+        icon: groqPng,
+        url: 'https://console.groq.com/',
+        inputs: [
+            {
+                label: 'Model',
+                name: 'model',
+                type: 'string',
+                description: `The STT model to load. Defaults to whisper-large-v3 if left blank.`,
+                placeholder: 'whisper-large-v3',
+                optional: true
+            },
+            {
+                label: 'Connect Credential',
+                name: 'credential',
+                type: 'credential',
+                credentialNames: ['groqApi']
+            },
+            {
+                label: 'Language',
+                name: 'language',
+                type: 'string',
+                description:
+                    'The language of the input audio. Supplying the input language in ISO-639-1 format will improve accuracy and latency.',
+                placeholder: 'en',
+                optional: true
+            },
+            {
+                label: 'Temperature',
+                name: 'temperature',
+                type: 'number',
+                step: 0.1,
+                description:
+                    'The sampling temperature, between 0 and 1. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic.',
+                optional: true
+            }
+        ]
     }
 }
 
@@ -146,6 +243,7 @@ const SpeechToText = ({ dialogProps }) => {
     const dispatch = useDispatch()
 
     useNotifier()
+    const theme = useTheme()
 
     const enqueueSnackbar = (...args) => dispatch(enqueueSnackbarAction(...args))
     const closeSnackbar = (...args) => dispatch(closeSnackbarAction(...args))
@@ -210,6 +308,9 @@ const SpeechToText = ({ dialogProps }) => {
                     newVal[provider.name] = { ...speechToText[provider.name], status: false }
                 }
             })
+            if (providerName !== 'none' && newVal['none']) {
+                newVal['none'].status = false
+            }
         }
         setSpeechToText(newVal)
         return newVal
@@ -248,11 +349,18 @@ const SpeechToText = ({ dialogProps }) => {
     return (
         <>
             <Box fullWidth sx={{ mb: 1, display: 'flex', flexDirection: 'column', gap: 1 }}>
-                <Typography variant='h4' sx={{ mb: 1 }}>
-                    Providers
-                </Typography>
+                <Typography>Providers</Typography>
                 <FormControl fullWidth>
-                    <Select size='small' value={selectedProvider} onChange={handleProviderChange}>
+                    <Select
+                        size='small'
+                        value={selectedProvider}
+                        onChange={handleProviderChange}
+                        sx={{
+                            '& .MuiSvgIcon-root': {
+                                color: theme?.customization?.isDarkMode ? '#fff' : 'inherit'
+                            }
+                        }}
+                    >
                         <MenuItem value='none'>None</MenuItem>
                         {Object.values(speechToTextProviders).map((provider) => (
                             <MenuItem key={provider.name} value={provider.name}>
@@ -271,7 +379,11 @@ const SpeechToText = ({ dialogProps }) => {
                                     width: 50,
                                     height: 50,
                                     borderRadius: '50%',
-                                    backgroundColor: 'white'
+                                    backgroundColor: 'white',
+                                    flexShrink: 0,
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center'
                                 }}
                             >
                                 <img

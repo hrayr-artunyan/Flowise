@@ -19,15 +19,31 @@ import {
     IDatabaseEntity,
     IUsedTool,
     IDocument,
-    IStateWithMessages
+    IStateWithMessages,
+    ConversationHistorySelection
 } from '../../../src/Interface'
-import { ToolCallingAgentOutputParser, AgentExecutor, SOURCE_DOCUMENTS_PREFIX, ARTIFACTS_PREFIX } from '../../../src/agents'
-import { getInputVariables, getVars, handleEscapeCharacters, prepareSandboxVars, removeInvalidImageMarkdown } from '../../../src/utils'
+import {
+    ToolCallingAgentOutputParser,
+    AgentExecutor,
+    SOURCE_DOCUMENTS_PREFIX,
+    ARTIFACTS_PREFIX,
+    TOOL_ARGS_PREFIX
+} from '../../../src/agents'
+import {
+    extractOutputFromArray,
+    getInputVariables,
+    getVars,
+    handleEscapeCharacters,
+    prepareSandboxVars,
+    removeInvalidImageMarkdown,
+    transformBracesWithColon
+} from '../../../src/utils'
 import {
     customGet,
     getVM,
     processImageMessage,
     transformObjectPropertyToFunction,
+    filterConversationHistory,
     restructureMessages,
     MessagesState,
     RunnableCallable,
@@ -68,9 +84,9 @@ const howToUseCode = `
         "sourceDocuments": [
             {
                 "pageContent": "This is the page content",
-                "metadata": "{foo: var}",
+                "metadata": "{foo: var}"
             }
-        ],
+        ]
     }
     \`\`\`
 
@@ -102,10 +118,10 @@ const howToUse = `
     |-----------|-----------|
     | user      | john doe  |
 
-2. If you want to use the agent's output as the value to update state, it is available as available as \`$flow.output\` with the following structure:
+2. If you want to use the Agent's output as the value to update state, it is available as available as \`$flow.output\` with the following structure:
     \`\`\`json
     {
-        "output": "Hello! How can I assist you today?",
+        "content": "Hello! How can I assist you today?",
         "usedTools": [
             {
                 "tool": "tool-name",
@@ -116,9 +132,9 @@ const howToUse = `
         "sourceDocuments": [
             {
                 "pageContent": "This is the page content",
-                "metadata": "{foo: var}",
+                "metadata": "{foo: var}"
             }
-        ],
+        ]
     }
     \`\`\`
 
@@ -195,7 +211,7 @@ class Agent_SeqAgents implements INode {
     constructor() {
         this.label = 'Agent'
         this.name = 'seqAgent'
-        this.version = 3.0
+        this.version = 4.1
         this.type = 'Agent'
         this.icon = 'seqAgent.png'
         this.category = 'Sequential Agents'
@@ -218,22 +234,58 @@ class Agent_SeqAgents implements INode {
                 default: examplePrompt
             },
             {
+                label: 'Prepend Messages History',
+                name: 'messageHistory',
+                description:
+                    'Prepend a list of messages between System Prompt and Human Prompt. This is useful when you want to provide few shot examples',
+                type: 'code',
+                hideCodeExecute: true,
+                codeExample: messageHistoryExample,
+                optional: true,
+                additionalParams: true
+            },
+            {
+                label: 'Conversation History',
+                name: 'conversationHistorySelection',
+                type: 'options',
+                options: [
+                    {
+                        label: 'User Question',
+                        name: 'user_question',
+                        description: 'Use the user question from the historical conversation messages as input.'
+                    },
+                    {
+                        label: 'Last Conversation Message',
+                        name: 'last_message',
+                        description: 'Use the last conversation message from the historical conversation messages as input.'
+                    },
+                    {
+                        label: 'All Conversation Messages',
+                        name: 'all_messages',
+                        description: 'Use all conversation messages from the historical conversation messages as input.'
+                    },
+                    {
+                        label: 'Empty',
+                        name: 'empty',
+                        description:
+                            'Do not use any messages from the conversation history. ' +
+                            'Ensure to use either System Prompt, Human Prompt, or Messages History.'
+                    }
+                ],
+                default: 'all_messages',
+                optional: true,
+                description:
+                    'Select which messages from the conversation history to include in the prompt. ' +
+                    'The selected messages will be inserted between the System Prompt (if defined) and ' +
+                    '[Messages History, Human Prompt].',
+                additionalParams: true
+            },
+            {
                 label: 'Human Prompt',
                 name: 'humanMessagePrompt',
                 type: 'string',
                 description: 'This prompt will be added at the end of the messages as human message',
                 rows: 4,
-                optional: true,
-                additionalParams: true
-            },
-            {
-                label: 'Messages History',
-                name: 'messageHistory',
-                description:
-                    'Return a list of messages between System Prompt and Human Prompt. This is useful when you want to provide few shot examples',
-                type: 'code',
-                hideCodeExecute: true,
-                codeExample: messageHistoryExample,
                 optional: true,
                 additionalParams: true
             },
@@ -245,9 +297,11 @@ class Agent_SeqAgents implements INode {
                 optional: true
             },
             {
-                label: 'Start | Agent | Condition | LLM | Tool Node',
+                label: 'Sequential Node',
                 name: 'sequentialNode',
-                type: 'Start | Agent | Condition | LLMNode | ToolNode',
+                type: 'Start | Agent | Condition | LLMNode | ToolNode | CustomFunction | ExecuteFlow',
+                description:
+                    'Can be connected to one of the following nodes: Start, Agent, Condition, LLM Node, Tool Node, Custom Function, Execute Flow',
                 list: true
             },
             {
@@ -260,7 +314,12 @@ class Agent_SeqAgents implements INode {
             {
                 label: 'Require Approval',
                 name: 'interrupt',
-                description: 'Require approval before executing tools. Will proceed when tools are not called',
+                description:
+                    'Pause execution and request user approval before running tools.\n' +
+                    'If enabled, the agent will prompt the user with customizable approve/reject options\n' +
+                    'and will proceed only after approval. This requires a configured agent memory to manage\n' +
+                    'the state and handle approval requests.\n' +
+                    'If no tools are invoked, the agent proceeds without interruption.',
                 type: 'boolean',
                 optional: true
             },
@@ -406,7 +465,9 @@ class Agent_SeqAgents implements INode {
         let tools = nodeData.inputs?.tools
         tools = flatten(tools)
         let agentSystemPrompt = nodeData.inputs?.systemMessagePrompt as string
+        agentSystemPrompt = transformBracesWithColon(agentSystemPrompt)
         let agentHumanPrompt = nodeData.inputs?.humanMessagePrompt as string
+        agentHumanPrompt = transformBracesWithColon(agentHumanPrompt)
         const agentLabel = nodeData.inputs?.agentName as string
         const sequentialNodes = nodeData.inputs?.sequentialNode as ISeqAgentNode[]
         const maxIterations = nodeData.inputs?.maxIterations as string
@@ -727,6 +788,9 @@ async function agentNode(
             throw new Error('Aborted!')
         }
 
+        const historySelection = (nodeData.inputs?.conversationHistorySelection || 'all_messages') as ConversationHistorySelection
+        // @ts-ignore
+        state.messages = filterConversationHistory(historySelection, input, state)
         // @ts-ignore
         state.messages = restructureMessages(llm, state)
 
@@ -734,10 +798,10 @@ async function agentNode(
 
         if (interrupt) {
             const messages = state.messages as unknown as BaseMessage[]
-            const lastMessage = messages[messages.length - 1]
+            const lastMessage = messages.length ? messages[messages.length - 1] : null
 
             // If the last message is a tool message and is an interrupted message, format output into standard agent output
-            if (lastMessage._getType() === 'tool' && lastMessage.additional_kwargs?.nodeId === nodeData.id) {
+            if (lastMessage && lastMessage._getType() === 'tool' && lastMessage.additional_kwargs?.nodeId === nodeData.id) {
                 let formattedAgentResult: {
                     output?: string
                     usedTools?: IUsedTool[]
@@ -781,6 +845,7 @@ async function agentNode(
         }
 
         let outputContent = typeof result === 'string' ? result : result.content || result.output
+        outputContent = extractOutputFromArray(outputContent)
         outputContent = removeInvalidImageMarkdown(outputContent)
 
         if (nodeData.inputs?.updateStateMemoryUI || nodeData.inputs?.updateStateMemoryCode) {
@@ -818,7 +883,7 @@ const getReturnOutput = async (nodeData: INodeData, input: string, options: ICom
     const updateStateMemory = nodeData.inputs?.updateStateMemory as string
 
     const selectedTab = tabIdentifier ? tabIdentifier.split(`_${nodeData.id}`)[0] : 'updateStateMemoryUI'
-    const variables = await getVars(appDataSource, databaseEntities, nodeData)
+    const variables = await getVars(appDataSource, databaseEntities, nodeData, options)
 
     const flow = {
         chatflowId: options.chatflowid,
@@ -871,7 +936,7 @@ const getReturnOutput = async (nodeData: INodeData, input: string, options: ICom
             throw new Error(e)
         }
     } else if (selectedTab === 'updateStateMemoryCode' && updateStateMemoryCode) {
-        const vm = await getVM(appDataSource, databaseEntities, nodeData, flow)
+        const vm = await getVM(appDataSource, databaseEntities, nodeData, options, flow)
         try {
             const response = await vm.run(`module.exports = async function() {${updateStateMemoryCode}}()`, __dirname)
             if (typeof response !== 'object') throw new Error('Return output must be an object')
@@ -982,6 +1047,17 @@ class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable
                     }
                 }
 
+                let toolInput
+                if (typeof output === 'string' && output.includes(TOOL_ARGS_PREFIX)) {
+                    const outputArray = output.split(TOOL_ARGS_PREFIX)
+                    output = outputArray[0]
+                    try {
+                        toolInput = JSON.parse(outputArray[1])
+                    } catch (e) {
+                        console.error('Error parsing tool input from tool')
+                    }
+                }
+
                 return new ToolMessage({
                     name: tool.name,
                     content: typeof output === 'string' ? output : JSON.stringify(output),
@@ -989,11 +1065,11 @@ class ToolNode<T extends BaseMessage[] | MessagesState> extends RunnableCallable
                     additional_kwargs: {
                         sourceDocuments,
                         artifacts,
-                        args: call.args,
+                        args: toolInput ?? call.args,
                         usedTools: [
                             {
                                 tool: tool.name ?? '',
-                                toolInput: call.args,
+                                toolInput: toolInput ?? call.args,
                                 toolOutput: output
                             }
                         ]

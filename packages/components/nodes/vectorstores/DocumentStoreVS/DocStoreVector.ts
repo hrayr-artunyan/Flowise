@@ -12,7 +12,6 @@ class DocStore_VectorStores implements INode {
     baseClasses: string[]
     inputs: INodeParams[]
     outputs: INodeOutputsValue[]
-    badge: string
 
     constructor() {
         this.label = 'Document Store (Vector)'
@@ -20,7 +19,6 @@ class DocStore_VectorStores implements INode {
         this.version = 1.0
         this.type = 'DocumentStoreVS'
         this.icon = 'dstore.svg'
-        this.badge = 'New'
         this.category = 'Vector Stores'
         this.description = `Search and retrieve documents from Document Store`
         this.baseClasses = [this.type]
@@ -58,7 +56,8 @@ class DocStore_VectorStores implements INode {
                 return returnData
             }
 
-            const stores = await appDataSource.getRepository(databaseEntities['DocumentStore']).find()
+            const searchOptions = options.searchOptions || {}
+            const stores = await appDataSource.getRepository(databaseEntities['DocumentStore']).findBy(searchOptions)
             for (const store of stores) {
                 if (store.status === 'UPSERTED') {
                     const obj = {

@@ -1,5 +1,5 @@
 import { omit } from 'lodash'
-import { INode, INodeData, INodeParams } from '../../../src/Interface'
+import { INode, INodeData, INodeOutputsValue, INodeParams } from '../../../src/Interface'
 import { TextSplitter } from 'langchain/text_splitter'
 import { TextLoader } from 'langchain/document_loaders/fs/text'
 import { DirectoryLoader } from 'langchain/document_loaders/fs/directory'
@@ -7,6 +7,9 @@ import { JSONLinesLoader, JSONLoader } from 'langchain/document_loaders/fs/json'
 import { CSVLoader } from '@langchain/community/document_loaders/fs/csv'
 import { PDFLoader } from '@langchain/community/document_loaders/fs/pdf'
 import { DocxLoader } from '@langchain/community/document_loaders/fs/docx'
+import { LoadOfSheet } from '../MicrosoftExcel/ExcelLoader'
+import { PowerpointLoader } from '../MicrosoftPowerpoint/PowerpointLoader'
+import { handleEscapeCharacters } from '../../../src/utils'
 
 class Folder_DocumentLoaders implements INode {
     label: string
@@ -18,11 +21,12 @@ class Folder_DocumentLoaders implements INode {
     category: string
     baseClasses: string[]
     inputs: INodeParams[]
+    outputs: INodeOutputsValue[]
 
     constructor() {
         this.label = 'Folder with Files'
         this.name = 'folderFiles'
-        this.version = 3.0
+        this.version = 4.0
         this.type = 'Document'
         this.icon = 'folder.svg'
         this.category = 'Document Loaders'
@@ -95,6 +99,20 @@ class Folder_DocumentLoaders implements INode {
                 additionalParams: true
             }
         ]
+        this.outputs = [
+            {
+                label: 'Document',
+                name: 'document',
+                description: 'Array of document objects containing metadata and pageContent',
+                baseClasses: [...this.baseClasses, 'json']
+            },
+            {
+                label: 'Text',
+                name: 'text',
+                description: 'Concatenated string from pageContent of documents',
+                baseClasses: ['string', 'json']
+            }
+        ]
     }
 
     async init(nodeData: INodeData): Promise<any> {
@@ -105,6 +123,7 @@ class Folder_DocumentLoaders implements INode {
         const pdfUsage = nodeData.inputs?.pdfUsage
         const pointerName = nodeData.inputs?.pointerName as string
         const _omitMetadataKeys = nodeData.inputs?.omitMetadataKeys as string
+        const output = nodeData.outputs?.output as string
 
         let omitMetadataKeys: string[] = []
         if (_omitMetadataKeys) {
@@ -118,10 +137,14 @@ class Folder_DocumentLoaders implements INode {
                 '.jsonl': (blob) => new JSONLinesLoader(blob, '/' + pointerName.trim()),
                 '.txt': (path) => new TextLoader(path),
                 '.csv': (path) => new CSVLoader(path),
-                '.xls': (path) => new CSVLoader(path),
-                '.xlsx': (path) => new CSVLoader(path),
+                '.xls': (path) => new LoadOfSheet(path),
+                '.xlsx': (path) => new LoadOfSheet(path),
+                '.xlsm': (path) => new LoadOfSheet(path),
+                '.xlsb': (path) => new LoadOfSheet(path),
                 '.doc': (path) => new DocxLoader(path),
                 '.docx': (path) => new DocxLoader(path),
+                '.ppt': (path) => new PowerpointLoader(path),
+                '.pptx': (path) => new PowerpointLoader(path),
                 '.pdf': (path) =>
                     pdfUsage === 'perFile'
                         ? // @ts-ignore
@@ -206,7 +229,15 @@ class Folder_DocumentLoaders implements INode {
             }))
         }
 
-        return docs
+        if (output === 'document') {
+            return docs
+        } else {
+            let finaltext = ''
+            for (const doc of docs) {
+                finaltext += `${doc.pageContent}\n`
+            }
+            return handleEscapeCharacters(finaltext, false)
+        }
     }
 }
 
