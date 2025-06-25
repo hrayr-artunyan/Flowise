@@ -24,7 +24,8 @@ import {
     INodeData,
     INodeParams,
     IDatabaseEntity,
-    MemoryMethods
+    MemoryMethods,
+    IServerSideEventStreamer
 } from '../../../src/Interface'
 import { QA_TEMPLATE, REPHRASE_TEMPLATE, RESPONSE_TEMPLATE } from './prompts'
 
@@ -52,7 +53,7 @@ class EngagezRetrievalQAChain_Chains implements INode {
     constructor(fields?: { sessionId?: string }) {
         this.label = 'Engagez Retrieval QA Chain'
         this.name = 'engagezRetrievalQAChain'
-        this.version = 3.0
+        this.version = 3.1
         this.type = 'EngagezRetrievalQAChain'
         this.icon = 'qa.svg'
         this.category = 'Chains'
@@ -197,16 +198,21 @@ class EngagezRetrievalQAChain_Chains implements INode {
         const rephrasePrompt = nodeData.inputs?.rephrasePrompt as string
         const responsePrompt = nodeData.inputs?.responsePrompt as string
         const returnSourceDocuments = nodeData.inputs?.returnSourceDocuments as boolean
+        const prependMessages = options?.prependMessages
 
         const appDataSource = options.appDataSource as DataSource
         const databaseEntities = options.databaseEntities as IDatabaseEntity
         const chatflowid = options.chatflowid as string
 
+        const shouldStreamResponse = options.shouldStreamResponse
+        const sseStreamer: IServerSideEventStreamer = options.sseStreamer as IServerSideEventStreamer
+        const chatId = options.chatId
+        const orgId = options.orgId
+
         const venueID = nodeData.inputs?.venueID as number
         const userID = nodeData.inputs?.userID as number
         
         const credentialData = await getCredentialData(nodeData.credential ?? '', options)
-        
         const apiUrl = getCredentialParam('apiURL', credentialData, nodeData)
         const apiKey = getCredentialParam('apiKey', credentialData, nodeData)
         const params: ICommonObject = { gid: venueID }
@@ -227,7 +233,8 @@ class EngagezRetrievalQAChain_Chains implements INode {
                 memoryKey: 'chat_history',
                 appDataSource,
                 databaseEntities,
-                chatflowid
+                chatflowid,
+                orgId
             })
         }
 
@@ -237,14 +244,17 @@ class EngagezRetrievalQAChain_Chains implements INode {
                 input = await checkInputs(moderations, input)
             } catch (e) {
                 await new Promise((resolve) => setTimeout(resolve, 500))
-                streamResponse(options.socketIO && options.socketIOClientId, e.message, options.socketIO, options.socketIOClientId)
+                if (options.shouldStreamResponse) {
+                    streamResponse(options.sseStreamer, options.chatId, e.message)
+                }
                 return formatResponse(e.message)
             }
         }
         const answerChain = createChain(model, vectorStoreRetriever, rephrasePrompt, customResponsePrompt)
 
-        const history = ((await memory.getChatMessages(this.sessionId, false)) as IMessage[]) ?? []
-        const loggerHandler = new ConsoleCallbackHandler(options.logger)
+        const history = ((await memory.getChatMessages(this.sessionId, false, prependMessages)) as IMessage[]) ?? []
+
+        const loggerHandler = new ConsoleCallbackHandler(options.logger, options?.orgId)
         const additionalCallback = await additionalCallbacks(nodeData, options)
 
         let callbacks = [loggerHandler, ...additionalCallback]
@@ -266,18 +276,23 @@ class EngagezRetrievalQAChain_Chains implements INode {
         let sourceDocuments: ICommonObject[] = []
         let text = ''
         let isStreamingStarted = false
-        const isStreamingEnabled = options.socketIO && options.socketIOClientId
 
         for await (const chunk of stream) {
             streamedResponse = applyPatch(streamedResponse, chunk.ops).newDocument
 
             if (streamedResponse.final_output) {
                 text = streamedResponse.final_output?.output
-                if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('end')
                 if (Array.isArray(streamedResponse?.logs?.[sourceRunnableName]?.final_output?.output)) {
                     sourceDocuments = streamedResponse?.logs?.[sourceRunnableName]?.final_output?.output
-                    if (isStreamingEnabled && returnSourceDocuments)
-                        options.socketIO.to(options.socketIOClientId).emit('sourceDocuments', sourceDocuments)
+                if (shouldStreamResponse && returnSourceDocuments) {
+                        if (sseStreamer) {
+                            sseStreamer.streamSourceDocumentsEvent(chatId, sourceDocuments)
+                        }
+                    }
+                }
+                if (shouldStreamResponse && sseStreamer) {
+                    sseStreamer.streamEndEvent(chatId)
+
                 }
             }
 
@@ -290,9 +305,17 @@ class EngagezRetrievalQAChain_Chains implements INode {
 
                 if (!isStreamingStarted) {
                     isStreamingStarted = true
-                    if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('start', token)
+                    if (shouldStreamResponse) {
+                        if (sseStreamer) {
+                            sseStreamer.streamStartEvent(chatId, token)
+                        }
+                    }
                 }
-                if (isStreamingEnabled) options.socketIO.to(options.socketIOClientId).emit('token', token)
+                if (shouldStreamResponse) {
+                    if (sseStreamer) {
+                        sseStreamer.streamTokenEvent(chatId, token)
+                    }
+                }
             }
         }
 
@@ -534,21 +557,28 @@ interface BufferMemoryExtendedInput {
     appDataSource: DataSource
     databaseEntities: IDatabaseEntity
     chatflowid: string
+    orgId: string
 }
 
 class BufferMemory extends FlowiseMemory implements MemoryMethods {
     appDataSource: DataSource
     databaseEntities: IDatabaseEntity
     chatflowid: string
+    orgId: string
 
     constructor(fields: BufferMemoryInput & BufferMemoryExtendedInput) {
         super(fields)
         this.appDataSource = fields.appDataSource
         this.databaseEntities = fields.databaseEntities
         this.chatflowid = fields.chatflowid
+        this.orgId = fields.orgId
     }
 
-    async getChatMessages(overrideSessionId = '', returnBaseMessages = false): Promise<IMessage[] | BaseMessage[]> {
+    async getChatMessages(
+        overrideSessionId = '',
+        returnBaseMessages = false,
+        prependMessages?: IMessage[]
+    ): Promise<IMessage[] | BaseMessage[]> {
         if (!overrideSessionId) return []
 
         const chatMessage = await this.appDataSource.getRepository(this.databaseEntities['ChatMessage']).find({
@@ -561,8 +591,12 @@ class BufferMemory extends FlowiseMemory implements MemoryMethods {
             }
         })
 
+        if (prependMessages?.length) {
+            chatMessage.unshift(...prependMessages)
+        }
+
         if (returnBaseMessages) {
-            return mapChatMessageToBaseMessage(chatMessage)
+            return await mapChatMessageToBaseMessage(chatMessage, this.orgId)
         }
 
         let returnIMessages: IMessage[] = []
