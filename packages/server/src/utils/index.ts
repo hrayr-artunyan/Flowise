@@ -1149,7 +1149,33 @@ export const replaceInputsWithConfig = (
                 if (nodeIds.includes(flowNodeData.id)) {
                     // Check if this parameter is enabled
                     if (isParameterEnabled(flowNodeData.label, config)) {
-                        inputsObj[config] = overrideConfig[config][flowNodeData.id]
+                        const existingValue = inputsObj[config]
+                        const overrideValue = overrideConfig[config][flowNodeData.id]
+
+                        // Merge objects instead of completely overriding
+                        if (
+                            typeof existingValue === 'object' &&
+                            typeof overrideValue === 'object' &&
+                            !Array.isArray(existingValue) &&
+                            !Array.isArray(overrideValue) &&
+                            existingValue !== null &&
+                            overrideValue !== null
+                        ) {
+                            inputsObj[config] = Object.assign({}, existingValue, overrideValue)
+                        } else if (typeof existingValue === 'string' && existingValue.startsWith('{') && existingValue.endsWith('}')) {
+                            try {
+                                const parsedExisting = JSON.parse(existingValue)
+                                if (typeof overrideValue === 'object' && !Array.isArray(overrideValue)) {
+                                    inputsObj[config] = Object.assign({}, parsedExisting, overrideValue)
+                                } else {
+                                    inputsObj[config] = overrideValue
+                                }
+                            } catch (e) {
+                                inputsObj[config] = overrideValue
+                            }
+                        } else {
+                            inputsObj[config] = overrideValue
+                        }
                     }
                     continue
                 } else if (nodeIds.some((nodeId) => nodeId.includes(flowNodeData.name))) {
@@ -1352,11 +1378,10 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[], component
                 }
                 continue
             } else if (inputParam.type === 'array') {
-                // get array item schema
                 const arrayItem = inputParam.array
                 if (Array.isArray(arrayItem)) {
-                    const arraySchema = []
-                    // Each array item is a field definition
+                    const arrayItemSchema: Record<string, string> = {}
+                    // Build object schema representing the structure of each array item
                     for (const item of arrayItem) {
                         let itemType = item.type
                         if (itemType === 'options') {
@@ -1365,10 +1390,7 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[], component
                         } else if (itemType === 'file') {
                             itemType = item.fileType ?? item.type
                         }
-                        arraySchema.push({
-                            name: item.name,
-                            type: itemType
-                        })
+                        arrayItemSchema[item.name] = itemType
                     }
                     obj = {
                         node: flowNode.data.label,
@@ -1376,7 +1398,7 @@ export const findAvailableConfigs = (reactFlowNodes: IReactFlowNode[], component
                         label: inputParam.label,
                         name: inputParam.name,
                         type: inputParam.type,
-                        schema: arraySchema
+                        schema: arrayItemSchema
                     }
                 }
             } else if (inputParam.loadConfig) {
