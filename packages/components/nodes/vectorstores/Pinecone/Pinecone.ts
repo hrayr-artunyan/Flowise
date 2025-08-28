@@ -26,7 +26,7 @@ class Pinecone_VectorStores implements INode {
     constructor() {
         this.label = 'Pinecone'
         this.name = 'pinecone'
-        this.version = 5.1
+        this.version = 5.0
         this.type = 'Pinecone'
         this.icon = 'pinecone.svg'
         this.category = 'Vector Stores'
@@ -69,7 +69,6 @@ class Pinecone_VectorStores implements INode {
                 type: 'string',
                 placeholder: 'my-first-namespace',
                 additionalParams: true,
-                acceptVariable: true,
                 optional: true
             },
             {
